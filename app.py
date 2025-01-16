@@ -9,7 +9,7 @@ import requests
 
 # Create the Flask app instance
 app = Flask(__name__)
-app.secret_key = "your_secret_key"
+app.secret_key = os.getenv("FLASK_SECRET_KEY")
 
 # Set up your environment variable and base URL
 API_KEY = os.getenv("OPENROUTER_API_KEY")
