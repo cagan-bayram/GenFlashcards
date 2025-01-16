@@ -1,15 +1,7 @@
-from flask import Flask, request, jsonify, render_template
-import requests
+import os
 
-app = Flask(__name__)
-
-# Set your OpenRouter API key here
-API_KEY = "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"
+API_KEY = os.getenv("OPENROUTER_API_KEY")
 BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-@app.route('/')
-def index():
-    return render_template('index.html')
 
 @app.route('/generate', methods=['POST'])
 def generate_flashcards():
@@ -37,6 +29,3 @@ def generate_flashcards():
         return jsonify({"flashcards": content})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(debug=True)
