@@ -1,2 +1,5 @@
 Flask
 requests
+firebase-admin
+flask-login
+Werkzeug
