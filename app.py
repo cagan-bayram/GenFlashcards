@@ -1,21 +1,22 @@
-# app.py
-
 from flask import Flask, request, jsonify, render_template
 import os
-import sqlite3
+import json
+import firebase_admin
+from firebase_admin import credentials, firestore
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
-import requests
 
-# Create the Flask app instance
+# Initialize Flask app
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY")
 
-# Set up your environment variable and base URL
-API_KEY = os.getenv("OPENROUTER_API_KEY")
-BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Initialize Firebase Admin SDK
+firebase_config = json.loads(os.getenv("FIREBASE_CONFIG"))
+cred = credentials.Certificate(firebase_config)  # Replace with your JSON file path
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 
-# Initialize Flask-Login
+# Flask-Login setup
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
@@ -28,44 +29,17 @@ class User(UserMixin):
 
 @login_manager.user_loader
 def load_user(user_id):
-    conn = sqlite3.connect('flashcards.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT id, username FROM users WHERE id = ?', (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return User(id=row[0], username=row[1])
+    doc = db.collection("users").document(user_id).get()
+    if doc.exists:
+        data = doc.to_dict()
+        return User(id=doc.id, username=data["username"])
     return None
-
-# Initialize the database
-def init_db():
-    conn = sqlite3.connect('flashcards.db')
-    cursor = conn.cursor()
-    # Create users table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-    ''')
-    # Create flashcards table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS flashcards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            topic TEXT NOT NULL,
-            flashcards TEXT NOT NULL,
-            user_id INTEGER NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
+# Signup route
 @app.route('/signup', methods=['POST'])
 def signup():
     data = request.json
@@ -76,16 +50,18 @@ def signup():
         return jsonify({"error": "Username and password are required"}), 400
 
     hashed_password = generate_password_hash(password)
-    try:
-        conn = sqlite3.connect('flashcards.db')
-        cursor = conn.cursor()
-        cursor.execute('INSERT INTO users (username, password) VALUES (?, ?)', (username, hashed_password))
-        conn.commit()
-        conn.close()
-        return jsonify({"message": "Signup successful!"}), 200
-    except sqlite3.IntegrityError:
-        return jsonify({"error": "Username already exists"}), 400
 
+    try:
+        # Add user to Firestore
+        user_ref = db.collection("users").where("username", "==", username).get()
+        if user_ref:
+            return jsonify({"error": "Username already exists"}), 400
+        user_doc = db.collection("users").add({"username": username, "password": hashed_password})
+        return jsonify({"message": "Signup successful!"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Login route
 @app.route('/login', methods=['POST'])
 def login():
     data = request.json
@@ -95,24 +71,27 @@ def login():
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
 
-    conn = sqlite3.connect('flashcards.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT id, username, password FROM users WHERE username = ?', (username,))
-    user_data = cursor.fetchone()
-    conn.close()
-
-    if user_data and check_password_hash(user_data[2], password):
-        user = User(id=user_data[0], username=user_data[1])
+    try:
+        user_docs = db.collection("users").where("username", "==", username).get()
+        if not user_docs:
+            return jsonify({"error": "Invalid credentials"}), 400
+        user_data = user_docs[0].to_dict()
+        if not check_password_hash(user_data["password"], password):
+            return jsonify({"error": "Invalid credentials"}), 400
+        user = User(id=user_docs[0].id, username=user_data["username"])
         login_user(user)
         return jsonify({"message": "Login successful!"}), 200
-    return jsonify({"error": "Invalid credentials"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
+# Logout route
 @app.route('/logout', methods=['GET'])
 @login_required
 def logout():
     logout_user()
     return jsonify({"message": "Logged out successfully!"}), 200
 
+# Generate flashcards
 @app.route('/generate', methods=['POST'])
 def generate_flashcards():
     data = request.json
@@ -123,7 +102,7 @@ def generate_flashcards():
 
     try:
         headers = {
-            "Authorization": f"Bearer {API_KEY}",
+            "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
             "Content-Type": "application/json"
         }
         payload = {
@@ -133,13 +112,14 @@ def generate_flashcards():
             ]
         }
 
-        response = requests.post(BASE_URL, headers=headers, json=payload)
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"].strip()
         return jsonify({"flashcards": content})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Save flashcards
 @app.route('/save', methods=['POST'])
 @login_required
 def save_flashcards():
@@ -151,37 +131,26 @@ def save_flashcards():
         return jsonify({"error": "Topic and flashcards are required"}), 400
 
     try:
-        conn = sqlite3.connect('flashcards.db')
-        cursor = conn.cursor()
-        cursor.execute('INSERT INTO flashcards (topic, flashcards, user_id) VALUES (?, ?, ?)',
-                       (topic, flashcards, current_user.id))
-        conn.commit()
-        conn.close()
+        # Save flashcards to Firestore
+        db.collection("flashcards").add({
+            "topic": topic,
+            "flashcards": flashcards,
+            "user_id": current_user.id
+        })
         return jsonify({"message": "Flashcards saved successfully!"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Get flashcards
 @app.route('/flashcards', methods=['GET'])
 @login_required
 def get_flashcards_paginated():
     try:
-        page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 10))
-        offset = (page - 1) * limit
-
-        conn = sqlite3.connect('flashcards.db')
-        cursor = conn.cursor()
-        cursor.execute('SELECT topic, flashcards FROM flashcards WHERE user_id = ? LIMIT ? OFFSET ?',
-                       (current_user.id, limit, offset))
-        rows = cursor.fetchall()
-        conn.close()
-
-        flashcards = [{"topic": row[0], "flashcards": row[1]} for row in rows]
+        user_flashcards = db.collection("flashcards").where("user_id", "==", current_user.id).stream()
+        flashcards = [{"topic": doc.to_dict()["topic"], "flashcards": doc.to_dict()["flashcards"]} for doc in user_flashcards]
         return jsonify(flashcards), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Run the Flask app
 if __name__ == '__main__':
-    init_db()
     app.run(debug=True)
