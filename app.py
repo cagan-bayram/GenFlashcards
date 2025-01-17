@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, render_template
 import os
 import json
 import firebase_admin
+import requests
 from firebase_admin import credentials, firestore
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
