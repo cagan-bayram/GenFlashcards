@@ -8,7 +8,7 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # Initialize Flask app
-app = Flask(__name__)
+app = Flask(__name__, static_folder='../static', template_folder='../templates')
 app.secret_key = os.getenv("FLASK_SECRET_KEY")
 
 # Initialize Firebase Admin SDK
@@ -153,5 +153,3 @@ def get_flashcards_paginated():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    app.run()
